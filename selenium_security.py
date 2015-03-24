@@ -1,8 +1,9 @@
 import unittest
 import re
+
 from selenium import webdriver
-from selenium.webdriver.common.keys import Keys
-from selenium.webdriver.common import proxy
+# from selenium.webdriver.common.keys import Keys
+# from selenium.webdriver.common import proxy
 from selenium.common.exceptions import UnexpectedAlertPresentException
 
 """Cool toys:
@@ -18,7 +19,8 @@ driver.page_source - get the page's HTML source code
 
 config = {
     'proxy': 'localhost:8080',
-    'base_url': 'http://localhost:8888/'
+    'base_url': 'http://localhost:8888/',
+    'screenshot_failures': True
 }
 
 
@@ -54,6 +56,69 @@ def get_generic_fuzz_checks():
     return strings
 
 
+class FuzzResponseObject():
+    def __init__(self, driver):
+        self.driver = driver
+        self.url = driver.current_url
+        self.page_source = driver.page_source
+        self.cookies = driver.get_cookies()
+        self.title = driver.title
+
+        if config['screenshot_failures']:
+            self.screenshot = driver.get_screenshot_as_png()
+
+
+class FuzzRequestObject():
+    def __init__(self, driver, fuzz_check, url, method='get', data=None):
+        self.driver = driver
+        self.fuzz_check = fuzz_check
+        self.method = method
+        self.url = url
+        self.data = data
+
+    def execute_fuzz_check(self, driver):
+        # Check for a string in the body
+        if self.fuzz_check.check == 'body':
+            response = self.perform_request()
+            if self.fuzz_check.fail_if in response.page_source:
+                print "GOT ONE!"
+
+        # Check for an alert box with a value
+        elif self.fuzz_check.check == 'alert':
+            try:
+                self.driver.get(self.url)
+
+            except UnexpectedAlertPresentException as e:
+                if int(e.alert_text) is 1:
+                    print "GOT ONE!"
+                    self.vulnerable_urls.append(self.url)
+
+    def perform_request(self):
+        if self.method == 'get':
+            self.driver.get(self.url)
+
+        elif self.method == 'post':
+            print 'hi'
+
+        elif self.method == 'put':
+            print 'hi'
+
+        elif self.method == 'delete':
+            print 'hi'
+
+
+class FuzzCheck():
+    def __init__(self, check, fail_if):
+        self.check = check
+        self.fail_if = fail_if
+
+    def get_fuzz_request_object(self, url, method='get', data=None):
+        return FuzzRequestObject(self, method, url, data)
+
+    def check_fail(self):
+        print 'hi'
+
+
 # class TestSequenceFunctions(unittest.TestCase):
 class SeleniumTestCase(unittest.TestCase):
 
@@ -61,17 +126,22 @@ class SeleniumTestCase(unittest.TestCase):
     def setUp(self):
         # Set up our proxy if one is defined
         if config['proxy']:
+            """
+            Not using Firefox anymore...
             p = proxy.Proxy({
                 'proxyType': proxy.ProxyType.MANUAL,
                 'httpProxy': config['proxy'],
                 'sslProxy': config['proxy']
             })
             self.driver = webdriver.Firefox(proxy=p)
+            """
+            args = ['--proxy=' + config['proxy'], '--proxy-type=http']
+            self.driver = webdriver.PhantomJS(service_args=args)
         else:
             self.driver = webdriver.Firefox()
 
         self.base_url = config['base_url']
-        self.vulnerable_urls = []
+        self.failed_fuzz_checks = []
 
     # Tear down our class after each test case, print vulnerabilities if any
     def tearDown(self):
@@ -84,7 +154,7 @@ class SeleniumTestCase(unittest.TestCase):
             print "\nNo vulnerabilities found\n"
         print "=" * 70, "\n"
 
-    # Helper method to extract variables from the current URL
+    # Get variables from the current URL
     # Returns list of tuples in (name, value) format.
     def get_url_variables(self):
         matches = re.findall(
@@ -92,16 +162,35 @@ class SeleniumTestCase(unittest.TestCase):
         )
         return matches
 
-    # Helper method to get the links for the current page
+    # Get links from the current page
     # Returns a list of tuples in (link text, link URL) format
     def get_links(self):
         results = []
-        links = self.driver.find_elements_by_css_selector('a')
+        links = self.driver.find_elements_by_tag_name('a')
         for link in links:
             url = link.get_attribute('href')
             text = link.text
             results.append((text, url))
         return results
+
+    # Get forms with input fields from the current page
+    # Returns a list of objects with 'form', 'method', and 'fields'
+    def get_forms_with_inputs(self):
+        form_fields = []
+        forms = self.driver.find_elements_by_tag_name('form')
+
+        for form in forms:
+            fields = form.find_elements_by_tag_name('input')
+            if len(fields) > 0:
+                obj = {
+                    'form': form,
+                    'method': form.get_attribute('method'),
+                    'fields': fields,
+                    'num_fields': len(fields)
+                }
+                form_fields.append(obj)
+
+        return form_fields
 
     # Pass in a dictionary of variables and values, add these to a URL
     # Returns a URL with all the variables defined
@@ -122,9 +211,7 @@ class SeleniumTestCase(unittest.TestCase):
                 )
         return temp_url
 
-    # Inject each of your fuzz strings into each variable in 'variables'
-    # attack_type = (all | single)
-    def fuzz_url_variables(self, url, variables, attack_type):
+    def fuzz_url_variables(self, url, variables, attack_type='all'):
         """Inject each of your fuzz strings into each variable
         url = base URL to begin attack from
         variables = list of variables to inject into the URL
@@ -167,15 +254,30 @@ class SeleniumTestCase(unittest.TestCase):
                             'check': fuzz_checks[fuzz_check], 'url': attack_url
                         })
 
-        self.get_attack(attack_targets)
+        # self.get_attack(attack_targets)
+        self.test_fuzz_check()
 
-    def get_attack(self, attack_targets):
+    def fuzz_forms(self, url, forms, attack_type='all'):
+        """Inject each of your fuzz strings into each form variable
+        url = URL to begin attack from
+        forms = List of form objects (returned from get_forms_with_inputs)
+        attack_type = (all | single)
+        """
+
+    def test_fuzz_check(self, attack_targets, method='get'):
+        """This method does the requesting, and checks to see if the fuzz check
+        fails based on its 'fail_if' condition
+        attack_targes = list of fuzz check objects
+        method = (get | post | put | delete)
+        """
         for target in attack_targets:
+
             if target['check']['check'] == 'body':
                 self.driver.get(target['url'])
                 if target['check']['fail_if'] in self.driver.page_source:
                     print "GOT ONE!"
                     self.vulnerable_urls.append(target['url'])
+
             elif target['check']['check'] == 'alert':
                 try:
                     self.driver.get(target['url'])
@@ -184,79 +286,3 @@ class SeleniumTestCase(unittest.TestCase):
                     if int(e.alert_text) is 1:
                         print "GOT ONE!"
                         self.vulnerable_urls.append(target['url'])
-
-    # TEST-SPECIFIC CODE STARTS HERE #
-
-    def login(self):
-        self.driver.get(self.base_url + 'login.php')
-
-        user_field = self.driver.find_element_by_name('user')
-        pass_field = self.driver.find_element_by_name('pass')
-        submit_field = self.driver.find_element_by_name('signin')
-
-        user_field.send_keys("demo")
-        pass_field.send_keys("demo")
-        submit_field.send_keys(Keys.RETURN)
-
-    # Test for SQL injection on the billing.php page
-    def test_sqli1(self):
-        self.login()
-
-        us_billing_link = self.driver.find_element_by_name('us_billing')
-        us_billing_link.click()
-
-        variables = self.get_url_variables()
-
-        print "-" * 70, "\nStarting SQLi attack...\n", "-" * 70
-
-        for variable in variables:
-            attack_url = self.base_url + 'billing.php?{0}={1}'
-            test_payload = "'"
-
-            self.driver.get(attack_url.format(variable[0], test_payload))
-            # Look for a common SQL server error message to determine success
-            if "SQL syntax" in self.driver.page_source:
-                self.vulnerable_urls.append(self.driver.current_url)
-
-    # Test for Cross-site scripting on the billing.php page
-    def test_xss1(self):
-        self.login()
-
-        us_billing_link = self.driver.find_element_by_name('us_billing')
-        us_billing_link.click()
-
-        variables = self.get_url_variables()
-
-        print "-" * 70, "\nStarting XSS attack...\n", "-" * 70
-
-        for variable in variables:
-            attack_url = self.base_url + 'billing.php?{0}={1}'
-            test_payload = "'\"><img src=x onerror=alert(1)>"
-
-            try:
-                self.driver.get(attack_url.format(variable[0], test_payload))
-
-            # Deal with the Selenium exception raised when an alert box pops up
-            # If we got an alert box with the text "1", we sere successful
-            except UnexpectedAlertPresentException as e:
-                if int(e.alert_text) is 1:
-                    self.vulnerable_urls.append(self.driver.current_url)
-    """
-
-    def test_fuzz_all(self):
-        self.login()
-        self.driver.get(config['base_url'] + 'billing.php')
-        links = self.get_links()
-        for text, link in links:
-            if 'login' not in link:
-                self.driver.get(link)
-
-            url_variables = self.get_url_variables()
-            self.fuzz_url_variables(
-                self.driver.current_url, url_variables, 'all'
-            )
-    """
-
-
-if __name__ == '__main__':
-    unittest.main(verbosity=0)
